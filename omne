@@ -1,0 +1,184 @@
+#!/usr/bin/python
+
+# 157631811 v2.py astro@starshade.org 
+# toggles to correct external screen combination based on what xrandr thinks is going on
+# 159660026 added conversion of ins to R-CTL for merope only.
+# 
+# to-do
+# 	add printer bt 00:16:38:C1:ED:19
+# 	hidd --connect 
+#		bluetooth://001638C1ED19
+
+import re
+import socket
+import subprocess
+from commands import *
+
+# dict of filesystem devices we manage
+filedevices_managed = {
+	'atlas':'679515bc-6a15-46a9-80d4-3fe08c8aba9a',
+	'maia':'a83b9dcc-fa71-441e-a1ca-759c7701aa30',
+	'transcend16':'7BBB-9007',
+}
+
+# --------- filesystem device management ---------------
+
+# list of disk uuids
+filedevices_attached = []
+status, filedevices_udevadm = getstatusoutput('udevadm info --export-db')
+for disk_by_uuid_match in re.findall(r"S: disk/by-uuid/(.*)",filedevices_udevadm):
+	filedevices_attached.append(disk_by_uuid_match)
+
+# full text of mount command output
+status, filedevices_mounted = getstatusoutput('mount')
+
+# loop through managed filedevices
+for device_name,device_uuid in filedevices_managed.items():
+	# check if device is mounted
+	mountdevpattern = "/dev/.* on /%s type " % ( device_name )
+	device_mounted = re.search(mountdevpattern,filedevices_mounted)
+
+	if filedevices_attached.count(device_uuid) > 0:
+		if device_mounted is None: # if attached device is not listed in mount
+			print "detected attached ummounted device %s" % ( device_name )
+			command = "mount /%s" % ( device_name )
+			subprocess.call(command, shell=True); # mount it
+		else: # report mounted
+			print "detected attached mounted device %s" % ( device_name )	
+	elif device_mounted is not None: # report problem
+		print "WARNING: detected unattached mounted device %s" % ( device_name )
+
+# -------- input device management ------------
+
+# full text of lsusb command output
+status, usbdevices_attached = getstatusoutput('lsusb')
+
+# correct the macally keyboard alt/menu mapping
+
+def xmodmap(xmodmap):
+	command = 'xmodmap -display ":0.0" -e "%s"' % ( xmodmap )
+	subprocess.call(command, shell=True);
+
+xmodmap("remove mod1 = Super_L")
+xmodmap("remove mod1 = Super_R")
+xmodmap("remove mod1 = Alt_L")
+xmodmap("remove mod1 = Alt_R")
+xmodmap("remove mod4 = Super_L")
+xmodmap("remove mod4 = Super_R")
+xmodmap("remove mod4 = Alt_L")
+xmodmap("remove mod4 = Alt_R")
+if re.search('2222:0013 MacAlly',usbdevices_attached):
+	print "loading macally keyboard xmodmap"
+	xmodmap("keycode  64 = Super_L NoSymbol Super_L")
+	xmodmap("keycode 108 = Super_R NoSymbol Super_R")
+	xmodmap("keycode 133 = Alt_L Meta_L Alt_L Meta_L")
+	xmodmap("keycode 134 = Alt_R Meta_R Alt_R Meta_R")
+	if socket.gethostname() == 'merope':
+		print "merope: convert ins -> ins"
+		xmodmap("remove Control = Control_L")
+		xmodmap("remove Control = Control_R")
+		xmodmap("keycode 118 = Insert NoSymbol Insert")
+		xmodmap("add Control = Control_L")
+else:
+	print "loading toughbook keyboard xmodmap"
+	xmodmap("keycode  64 = Alt_L Meta_L Alt_L Meta_L")
+	xmodmap("keycode 108 = Alt_R Meta_R Alt_R Meta_R")
+	xmodmap("keycode 133 = Super_L NoSymbol Super_L")
+	xmodmap("keycode 134 = Super_R NoSymbol Super_R")
+	if socket.gethostname() == 'merope':
+		print "merope: convert ins -> rctl"
+		xmodmap("remove Control = Control_L")
+		xmodmap("remove Control = Control_R")
+		xmodmap("keycode 118 = Control_R NoSymbol Control_R")
+		xmodmap("add Control = Control_L")
+		xmodmap("add Control = Control_R")
+xmodmap("add mod1 = Alt_L")
+xmodmap("add mod1 = Alt_R")
+xmodmap("add mod4 = Super_L")
+
+# if nostromo n50 is present, load pystromo config
+
+# first get the pid, if any, of running pystromo
+pystromo_pid = 0
+status, pystromoprocs = getstatusoutput('ps aux | grep "python /home/astro/bin/pystromo/pystromo-remap.py -m" | grep -v grep')
+if len(pystromoprocs) > 0:
+	for pystromoprocline in re.split("\n",pystromoprocs):
+		pystromoprocarr = re.split(' +',pystromoprocline)
+		pystromo_pid = pystromoprocarr[1]
+
+if re.search('050d:0805 Belkin Components Nostromo N50 GamePad',usbdevices_attached):
+	if pystromo_pid == 0:
+		print "loading pystromo config for nostromo n50"
+		command = "~/bin/pystromo/pystromo-remap.py -m ~/bin/pystromo/config/n50_astro_157600048.map &"
+		subprocess.call(command, shell=True);
+elif pystromo_pid != 0:
+	print "killing pystromo"
+	command = "kill -9 %s" % ( pystromo_pid )
+	subprocess.call(command, shell=True);
+
+# ------------ display management -------------
+
+# detect displays
+status, xrandr = getstatusoutput('xrandr')
+displays_connected = re.findall(r"([A-Z0-9]+) connected .*\n(.*)",xrandr)
+display = {}
+if len(displays_connected) > 0:
+	for display_lines in displays_connected:
+		display_name = display_lines[0]
+		display_params = re.search(r" (\d+)x(\d+)\s+\d+\.\d([ \*])([ \+])",display_lines[1])
+		display[display_name] = {
+			'res_x':int(float(display_params.group(1))),
+			'res_y':int(float(display_params.group(2))),
+			'is_active':(display_params.group(3) == '*'),
+			'is_default':(display_params.group(4) == '+'),
+		}
+		#print " %s res:%dx%d active:%s default:%s" % ( 
+		#	display_name,
+		#	display[display_name]['res_x'],
+		#	display[display_name]['res_y'],
+		#	display[display_name]['is_active'],
+		#	display[display_name]['is_default'] )
+
+# prepare and execute xrandr command per detected display configuration
+display['LVDS1']['pos_x'] = 0
+display['LVDS1']['pos_y'] = 0
+
+if 'VGA1' in display:
+	display['VGA1']['pos_x'] = 0
+	display['VGA1']['pos_y'] = 0
+
+#	if (display['VGA1']['res_x'] == 1024) and (display['VGA1']['res_y'] == 768):
+		# external on top (left-justified)
+#		display['LVDS1']['pos_y'] = display['LVDS1']['res_y']
+#		print "configuring external largescreen"
+
+#	else:
+	# external to left
+	#display['LVDS1']['pos_x'] = display['VGA1']['res_x'] 
+	# external to right
+	display['VGA1']['pos_x'] = display['LVDS1']['res_x'] 
+	# aligned baseline
+	display['LVDS1']['pos_y'] = (display['VGA1']['res_y'] - display['LVDS1']['res_y'])
+	print "configuring external monitor"
+
+	vga1_command = '--mode %dx%d --pos %dx%d' % (
+		display['VGA1']['res_x'],
+		display['VGA1']['res_y'],
+		display['VGA1']['pos_x'],
+		display['VGA1']['pos_y'] )
+
+else:
+
+	vga1_command = '--off'
+	print "configuring laptop-only display"
+
+command = "xrandr --output LVDS1 --mode %dx%d --pos %dx%d --output VGA1 %s" % (
+	display['LVDS1']['res_x'], 
+	display['LVDS1']['res_y'],
+	display['LVDS1']['pos_x'],
+	display['LVDS1']['pos_y'],
+	vga1_command )
+subprocess.call(command, shell=True)
+print 'command: "%s"' % ( command )
+
+# EOF
